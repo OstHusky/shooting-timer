@@ -136,6 +136,15 @@
    Single file, no deps. iOS Safari. Raw WAV always preserved.
    ============================================================ */
 
+// Surface any runtime error on-screen (no Mac/console needed for iPhone debugging)
+window.addEventListener('error', e=>{
+  let box=document.getElementById('errbox');
+  if(!box){ box=document.createElement('div'); box.id='errbox';
+    box.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#5a1010;color:#fff;font:12px monospace;padding:8px;white-space:pre-wrap;';
+    document.body.appendChild(box); }
+  box.textContent='JS ERROR: '+e.message+'\n'+(e.filename||'')+':'+(e.lineno||'');
+});
+
 const SR_TARGET = 48000;     // iOS forces 48k anyway
 const FFT_SIZE  = 512;       // spectrogram + centroid
 const HOP       = 256;       // spectrogram hop
@@ -219,8 +228,8 @@ let rawLength=0;
 let energyPoints=[];    // {t, db} per analysis block
 let recStartTime=0;
 
-// live detector + graph
-const detector = new ShotDetector();
+// live detector + graph (instance created after prototype is defined, see bottom)
+let detector = null;
 let liveEnergyRing=[];  // for live graph: array of db values
 const LIVE_GRAPH_POINTS=600;
 
@@ -457,6 +466,9 @@ ShotDetector.prototype.centroidOf=function(samples){
   }
   return den>0 ? num/den : 0;
 };
+
+// instantiate now that the prototype is fully defined
+detector = new ShotDetector();
 
 // ============================================================
 // Recording control
