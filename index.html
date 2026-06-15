@@ -64,7 +64,7 @@
   </div>
   <div class="counter"><span id="liveCount">0</span><small>выстрелов (live)</small></div>
   <div class="legend" style="text-align:center;margin-top:6px">
-    <span class="dotg">●</span> засчитан &nbsp; <span class="dotr">●</span> зарезано как эхо
+    <span class="dotg">●</span> засчитан &nbsp; <span class="dotr">●</span> эхо &nbsp; <span style="color:#ffd24f">●</span> бип таймера
   </div>
 </div>
 
@@ -98,12 +98,18 @@
     <input type="range" id="sEchoW" min="5" max="120" step="5" value="25"></label>
   <label class="slider">Порог спектрального центроида (Гц) <span class="val" id="vCent">2500</span>
     <input type="range" id="sCent" min="500" max="8000" step="100" value="2500"></label>
+  <label class="slider">Мин. шумоподобность спектра (flatness, %) <span class="val" id="vFlat">25</span>
+    <input type="range" id="sFlat" min="0" max="90" step="1" value="25"></label>
+  <label class="slider">Спад для сброса (дБ ниже пика) <span class="val" id="vReset">12</span>
+    <input type="range" id="sReset" min="3" max="40" step="1" value="12"></label>
   <details><summary>Что делают слои</summary>
     <div class="legend" style="margin-top:6px">
       L1 фронт (slope) — отличает резкий выстрел от пологого эха даже при клиппинге.<br>
       L2 эхо-окно+refractory — режет всё в зоне известной задержки эха.<br>
       L3 модель времени — резкий фронт в эхо-окне = реальный выстрел поверх эха.<br>
-      L4 центроид — глухой звук (низкий центроид) = эхо, яркий = выстрел.
+      L4 центроид — глухой звук (низкий центроид) = эхо, яркий = выстрел.<br>
+      L5 flatness — выстрел шумоподобный (плоский спектр), бип таймера тональный → отсекается.<br>
+      Сброс по спаду — новый выстрел засчитывается только после спада хвоста ниже пика на N дБ.
     </div>
   </details>
 </div>
@@ -163,6 +169,8 @@ const sliders = {
   echo:  {el:$('sEcho'),  out:$('vEcho')},
   echoW: {el:$('sEchoW'), out:$('vEchoW')},
   cent:  {el:$('sCent'),  out:$('vCent')},
+  flat:  {el:$('sFlat'),  out:$('vFlat')},
+  reset: {el:$('sReset'), out:$('vReset')},
 };
 Object.values(sliders).forEach(s=>{
   const upd=()=>{ s.out.textContent=s.el.value; };
@@ -176,6 +184,8 @@ function cfg(){
     echo:  +sliders.echo.el.value,    // ms echo delay
     echoW: +sliders.echoW.el.value,   // ms echo window half-width
     cent:  +sliders.cent.el.value,    // Hz centroid threshold
+    flat:  +sliders.flat.el.value,    // % min spectral flatness (broadband-ness)
+    reset: +sliders.reset.el.value,   // dB below peak required before re-arming
   };
 }
 
@@ -370,7 +380,7 @@ function drawEnergyGraph(ctx, canvas, points, markers, isLive){
       } else {
         x=(m.x)*w;
       }
-      ctx.strokeStyle = m.kind==='shot' ? '#39d353' : '#ff5a5a';
+      ctx.strokeStyle = m.kind==='shot' ? '#39d353' : (m.kind==='tone' ? '#ffd24f' : '#ff5a5a');
       ctx.lineWidth=2; ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();
     }
   }
@@ -393,9 +403,11 @@ ShotDetector.prototype.reset=function(){
   this.prevDb=-90;
   this.lastShotT=-999;    // last counted shot time (s)
   this.lastT=0;
-  this.markers=[];        // {t, kind:'shot'|'echo'}
+  this.markers=[];        // {t, kind:'shot'|'echo'|'tone'}
   this.pendingEchoes=[];  // predicted echo times from counted shots
-  this.armed=true;
+  // state machine: 'armed' = ready to fire, 'decay' = waiting for tail to fall
+  this.state='armed';
+  this.eventPeakDb=-90;   // peak dB of the current loud event (for decay reset)
 };
 ShotDetector.prototype.feed=function(t, db, peak, samples, c){
   this.lastT=t;
@@ -406,33 +418,58 @@ ShotDetector.prototype.feed=function(t, db, peak, samples, c){
   const slope = (db - this.prevDb)/Math.max(blockMs,0.1); // dB per ms
   this.prevDb=db;
 
-  // candidate onset: loud enough over background AND in refractory check
   const overBg = db - this.bg;
   const sinceShot = (t - this.lastShotT)*1000; // ms
 
-  if (overBg < c.sens) return;          // not loud enough -> not a candidate
-  if (sinceShot < c.refr) return;       // L2 refractory: ignore everything in dead window
+  // ---- DECAY STATE: a shot was just counted; wait for its tail to fall ----
+  // This kills the "one shot counted several times" bug: the decaying tail
+  // can stay above sens for tens of ms, but we refuse to re-arm until it has
+  // dropped >= reset dB below the event peak AND refractory elapsed.
+  if (this.state==='decay'){
+    if (db > this.eventPeakDb) this.eventPeakDb = db; // track the true peak
+    const fellEnough = (this.eventPeakDb - db) >= c.reset;
+    const refrDone   = sinceShot >= c.refr;
+    if (fellEnough && refrDone && overBg < c.sens){
+      this.state='armed';           // tail has settled, ready for next shot
+    }
+    return; // never count anything while a tail is decaying
+  }
 
-  // We have a loud candidate. Decide shot vs echo.
+  // ---- ARMED STATE: look for a new loud onset ----
+  if (overBg < c.sens) return;      // not loud enough -> nothing
+  if (sinceShot < c.refr) return;   // refractory guard
+
+  // We have a loud candidate. Classify it.
+  this.eventPeakDb = db;            // start tracking this event's peak
+
   // L1: attack slope
   const sharp = slope >= c.slope;
+  // L4: spectral centroid
+  const centroid = this.centroidOf(samples);
+  const bright = centroid >= c.cent;
+  // L5: spectral flatness — broadband (gunshot) vs tonal (timer beep)
+  const flat = this.flatnessOf(samples); // 0..1
+  const broadband = (flat*100) >= c.flat;
 
-  // L2/L3: is this candidate inside any predicted echo window?
+  // L2/L3: inside a predicted echo window?
   let inEchoWin=false;
   for(const e of this.pendingEchoes){
     if (Math.abs((t-e)*1000) <= c.echoW){ inEchoWin=true; break; }
   }
 
-  // L4: spectral centroid
-  const centroid = this.centroidOf(samples);
-  const bright = centroid >= c.cent;
+  // Tonal events (timer beep) are rejected outright, regardless of loudness.
+  if (!broadband){
+    this.markers.push({t, kind:'tone'});
+    this.state='decay';             // still wait out its tail so it can't re-trigger
+    this.lastShotT=t;
+    if(this.markers.length>500) this.markers.shift();
+    return;
+  }
 
   let isShot;
   if (inEchoWin){
-    // In echo window: only a SHARP + BRIGHT transient counts as a real shot over echo (L3)
-    isShot = sharp && bright;
+    isShot = sharp && bright;       // real shot over echo must be sharp+bright
   } else {
-    // Outside echo window: sharp OR bright enough = shot
     isShot = sharp || bright;
   }
 
@@ -440,15 +477,31 @@ ShotDetector.prototype.feed=function(t, db, peak, samples, c){
     this.count++;
     this.lastShotT=t;
     this.markers.push({t, kind:'shot'});
-    // predict its echo (L3)
     this.pendingEchoes.push(t + c.echo/1000);
-    // keep echo list short
     this.pendingEchoes = this.pendingEchoes.filter(e => (e - t) > -0.5);
   } else {
     this.markers.push({t, kind:'echo'});
-    this.lastShotT=t; // still apply refractory so echo tail doesn't multi-trigger
+    this.lastShotT=t;
   }
+  this.state='decay';               // enter decay regardless: wait for tail to fall
   if(this.markers.length>500) this.markers.shift();
+};
+// spectral flatness = geometric mean / arithmetic mean of magnitude spectrum.
+// ~1 for white/broadband noise (gunshot), ~0 for a pure tone (beep).
+ShotDetector.prototype.flatnessOf=function(samples){
+  const N=Math.min(samples.length,128);
+  const K=48; // bins to evaluate
+  let logSum=0, arSum=0, cnt=0;
+  for(let k=1;k<K;k++){
+    let re=0,im=0; const wk=2*Math.PI*k/N;
+    for(let n=0;n<N;n++){ const ang=wk*n; re+=samples[n]*Math.cos(ang); im-=samples[n]*Math.sin(ang); }
+    const p=(re*re+im*im)/(N*N)+1e-12; // power, avoid log(0)
+    logSum+=Math.log(p); arSum+=p; cnt++;
+  }
+  if(cnt===0||arSum<=0) return 0;
+  const geo=Math.exp(logSum/cnt);
+  const ar=arSum/cnt;
+  return Math.max(0,Math.min(1, geo/ar));
 };
 // spectral centroid via simple DFT magnitude on a short window (cheap, blocks are tiny)
 ShotDetector.prototype.centroidOf=function(samples){
