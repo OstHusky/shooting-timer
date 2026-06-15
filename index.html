@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Таймер для стрельбы — диагностика</title>
+<style>
+  :root { --bg:#15171c; --panel:#1e2128; --line:#2c313c; --txt:#e6e8ec; --muted:#9aa3b2;
+          --green:#39d353; --red:#ff5a5a; --accent:#4f8cff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; padding:12px; padding-bottom:40px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:14px; margin:14px 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+  button { font-size:16px; padding:12px 16px; border-radius:8px; border:1px solid var(--line);
+           background:#2a2f3a; color:var(--txt); cursor:pointer; }
+  button:active { transform:scale(.98); }
+  button.primary { background:var(--accent); border-color:var(--accent); }
+  button.rec { background:var(--red); border-color:var(--red); }
+  button:disabled { opacity:.4; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .grow { flex:1; }
+  select { font-size:16px; padding:10px; border-radius:8px; background:#2a2f3a; color:var(--txt); border:1px solid var(--line); }
+  .counter { font-size:48px; font-weight:700; text-align:center; line-height:1; }
+  .counter small { font-size:14px; color:var(--muted); font-weight:400; display:block; margin-top:4px; }
+  .stat { display:flex; justify-content:space-between; font-size:13px; color:var(--muted); margin:2px 0; }
+  .stat b { color:var(--txt); }
+  label.slider { display:block; margin:10px 0; font-size:13px; }
+  label.slider .val { float:right; color:var(--accent); font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; margin-top:4px; }
+  canvas { width:100%; display:block; background:#0e1014; border-radius:8px; border:1px solid var(--line); }
+  .rec-item { border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px; }
+  .rec-item .meta { font-size:13px; color:var(--muted); }
+  .rec-item .actions { margin-top:8px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:6px; font-size:12px; background:#2a2f3a; }
+  .badge.single{color:var(--green)} .badge.double{color:#ffd24f} .badge.series{color:var(--accent)}
+  .warn { color:#ffd24f; font-size:12px; margin-top:6px; }
+  .legend { font-size:12px; color:var(--muted); }
+  .legend .dotg{color:var(--green)} .legend .dotr{color:var(--red)}
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+
+<h1>Таймер для стрельбы — диагностика</h1>
+<div class="legend">Запись сырого звука + детектор выстрелов с резкой эха. WAV сохраняется нетронутым.</div>
+
+<div class="panel">
+  <div class="row">
+    <button id="initBtn" class="primary grow">🎤 Включить микрофон</button>
+  </div>
+  <div id="micStatus" class="warn" style="display:none"></div>
+</div>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:10px">
+    <select id="labelSel">
+      <option value="single">Одиночный</option>
+      <option value="double">Двойной</option>
+      <option value="series">Серия</option>
+    </select>
+    <button id="recBtn" class="rec grow" disabled>● Запись</button>
+  </div>
+  <div class="counter"><span id="liveCount">0</span><small>выстрелов (live)</small></div>
+  <div class="legend" style="text-align:center;margin-top:6px">
+    <span class="dotg">●</span> засчитан &nbsp; <span class="dotr">●</span> зарезано как эхо
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Сила звука (dBFS)</h2>
+  <canvas id="liveCanvas" height="160"></canvas>
+</div>
+
+<div class="panel">
+  <h2>Настройки детектора</h2>
+  <div class="row" style="margin-bottom:10px">
+    <select id="profileSel" class="grow"><option value="">— профиль —</option></select>
+    <button id="loadProfBtn">Загрузить</button>
+    <button id="delProfBtn">🗑</button>
+  </div>
+  <div class="row" style="margin-bottom:4px">
+    <input id="profName" type="text" placeholder="Имя профиля" class="grow"
+      style="font-size:16px;padding:10px;border-radius:8px;background:#2a2f3a;color:var(--txt);border:1px solid var(--line)">
+    <button id="saveProfBtn" class="primary">💾 Сохранить</button>
+  </div>
+  <div id="profMsg" class="legend" style="margin-bottom:8px"></div>
+  <label class="slider">Чувствительность (порог фронта над фоном, дБ) <span class="val" id="vSens">12</span>
+    <input type="range" id="sSens" min="3" max="40" step="1" value="12"></label>
+  <label class="slider">Крутизна фронта мин. (дБ/мс) <span class="val" id="vSlope">6</span>
+    <input type="range" id="sSlope" min="1" max="30" step="1" value="6"></label>
+  <label class="slider">Refractory — мёртвое окно после выстрела (мс) <span class="val" id="vRefr">40</span>
+    <input type="range" id="sRefr" min="5" max="200" step="5" value="40"></label>
+  <label class="slider">Задержка эха (мс) <span class="val" id="vEcho">250</span>
+    <input type="range" id="sEcho" min="50" max="600" step="5" value="250"></label>
+  <label class="slider">Ширина окна эха ± (мс) <span class="val" id="vEchoW">25</span>
+    <input type="range" id="sEchoW" min="5" max="120" step="5" value="25"></label>
+  <label class="slider">Порог спектрального центроида (Гц) <span class="val" id="vCent">2500</span>
+    <input type="range" id="sCent" min="500" max="8000" step="100" value="2500"></label>
+  <details><summary>Что делают слои</summary>
+    <div class="legend" style="margin-top:6px">
+      L1 фронт (slope) — отличает резкий выстрел от пологого эха даже при клиппинге.<br>
+      L2 эхо-окно+refractory — режет всё в зоне известной задержки эха.<br>
+      L3 модель времени — резкий фронт в эхо-окне = реальный выстрел поверх эха.<br>
+      L4 центроид — глухой звук (низкий центроид) = эхо, яркий = выстрел.
+    </div>
+  </details>
+</div>
+
+<div class="panel">
+  <h2>Записи</h2>
+  <div class="row" style="margin-bottom:8px">
+    <button id="refreshBtn">Обновить</button>
+    <button id="exportAllBtn">⬇ Экспорт всех</button>
+    <button id="clearBtn">🗑 Очистить всё</button>
+  </div>
+  <div id="recList"></div>
+</div>
+
+<!-- Viewer for a saved record -->
+<div class="panel" id="viewerPanel" style="display:none">
+  <h2>Просмотр записи <button id="closeViewer" style="float:right;font-size:13px;padding:4px 10px">✕</button></h2>
+  <div id="viewerMeta" class="legend"></div>
+  <h2>Сила звука (dBFS)</h2>
+  <canvas id="viewEnergy" height="160"></canvas>
+  <h2>Спектрограмма</h2>
+  <canvas id="viewSpec" height="200"></canvas>
+  <div class="legend">Ось Y — частота 0…24 кГц снизу вверх. Цвет — энергия.</div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   Shooting Timer — diagnostic recorder + 4-layer shot detector
+   Single file, no deps. iOS Safari. Raw WAV always preserved.
+   ============================================================ */
+
+const SR_TARGET = 48000;     // iOS forces 48k anyway
+const FFT_SIZE  = 512;       // spectrogram + centroid
+const HOP       = 256;       // spectrogram hop
+
+// ---------- DOM ----------
+const $ = id => document.getElementById(id);
+const initBtn=$('initBtn'), recBtn=$('recBtn'), labelSel=$('labelSel');
+const micStatus=$('micStatus'), liveCount=$('liveCount');
+const liveCanvas=$('liveCanvas'), liveCtx=liveCanvas.getContext('2d');
+
+// sliders
+const sliders = {
+  sens:  {el:$('sSens'),  out:$('vSens')},
+  slope: {el:$('sSlope'), out:$('vSlope')},
+  refr:  {el:$('sRefr'),  out:$('vRefr')},
+  echo:  {el:$('sEcho'),  out:$('vEcho')},
+  echoW: {el:$('sEchoW'), out:$('vEchoW')},
+  cent:  {el:$('sCent'),  out:$('vCent')},
+};
+Object.values(sliders).forEach(s=>{
+  const upd=()=>{ s.out.textContent=s.el.value; };
+  s.el.addEventListener('input',upd); upd();
+});
+function cfg(){
+  return {
+    sens:  +sliders.sens.el.value,    // dB over background to arm
+    slope: +sliders.slope.el.value,   // dB/ms min attack slope
+    refr:  +sliders.refr.el.value,    // ms refractory
+    echo:  +sliders.echo.el.value,    // ms echo delay
+    echoW: +sliders.echoW.el.value,   // ms echo window half-width
+    cent:  +sliders.cent.el.value,    // Hz centroid threshold
+  };
+}
+
+// ---------- Settings profiles (localStorage, multiple presets) ----------
+const PROF_KEY='shoottimer_profiles';
+const profileSel=$('profileSel'), profName=$('profName'), profMsg=$('profMsg');
+function loadProfiles(){ try{ return JSON.parse(localStorage.getItem(PROF_KEY))||{}; }catch(e){ return {}; } }
+function saveProfiles(p){ localStorage.setItem(PROF_KEY, JSON.stringify(p)); }
+function applyCfg(c){
+  for(const k of Object.keys(sliders)){
+    if(c[k]!=null){ sliders[k].el.value=c[k]; sliders[k].out.textContent=c[k]; }
+  }
+}
+function refreshProfileList(sel){
+  const profs=loadProfiles();
+  const names=Object.keys(profs).sort();
+  profileSel.innerHTML='<option value="">— профиль —</option>'+
+    names.map(n=>`<option value="${n}">${n}</option>`).join('');
+  if(sel) profileSel.value=sel;
+}
+$('saveProfBtn').addEventListener('click', ()=>{
+  const name=(profName.value||'').trim();
+  if(!name){ profMsg.textContent='Введи имя профиля.'; return; }
+  const profs=loadProfiles(); profs[name]=cfg(); saveProfiles(profs);
+  refreshProfileList(name);
+  profMsg.textContent='Сохранён профиль «'+name+'».';
+});
+$('loadProfBtn').addEventListener('click', ()=>{
+  const name=profileSel.value;
+  if(!name){ profMsg.textContent='Выбери профиль из списка.'; return; }
+  const profs=loadProfiles();
+  if(profs[name]){ applyCfg(profs[name]); profName.value=name; profMsg.textContent='Загружен «'+name+'».'; }
+});
+$('delProfBtn').addEventListener('click', ()=>{
+  const name=profileSel.value;
+  if(!name){ profMsg.textContent='Выбери профиль для удаления.'; return; }
+  const profs=loadProfiles(); delete profs[name]; saveProfiles(profs);
+  refreshProfileList(); profMsg.textContent='Удалён «'+name+'».';
+});
+refreshProfileList();
+
+// ---------- Audio state ----------
+let audioCtx=null, workletNode=null, mediaStream=null, sourceNode=null;
+let actualSampleRate=SR_TARGET, micSettingsActual={};
+let recording=false;
+
+// recording buffers
+let rawChunks=[];       // Float32Array chunks (raw mono samples)
+let rawLength=0;
+let energyPoints=[];    // {t, db} per analysis block
+let recStartTime=0;
+
+// live detector + graph
+const detector = new ShotDetector();
+let liveEnergyRing=[];  // for live graph: array of db values
+const LIVE_GRAPH_POINTS=600;
+
+// ============================================================
+// AudioWorklet processor (inline via Blob)
+// Posts raw Float32 blocks to main thread.
+// ============================================================
+const workletCode = `
+class Cap extends AudioWorkletProcessor {
+  process(inputs){
+    const ch = inputs[0][0];
+    if (ch) { this.port.postMessage(ch.slice(0)); }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);
+`;
+
+async function initMic(){
+  try {
+    initBtn.disabled=true; initBtn.textContent='Запуск…';
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation:false, noiseSuppression:false, autoGainControl:false,
+        channelCount:1
+      }
+    });
+    const track = mediaStream.getAudioTracks()[0];
+    micSettingsActual = track.getSettings ? track.getSettings() : {};
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    await audioCtx.resume();
+    actualSampleRate = audioCtx.sampleRate;
+
+    const blobUrl = URL.createObjectURL(new Blob([workletCode],{type:'application/javascript'}));
+    await audioCtx.audioWorklet.addModule(blobUrl);
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+    workletNode = new AudioWorkletNode(audioCtx,'cap');
+    workletNode.port.onmessage = e => onAudioBlock(e.data);
+    sourceNode.connect(workletNode);
+    // worklet must be connected to destination on some browsers to pull data
+    const silent = audioCtx.createGain(); silent.gain.value=0;
+    workletNode.connect(silent); silent.connect(audioCtx.destination);
+
+    initBtn.textContent='🎤 Микрофон активен';
+    recBtn.disabled=false;
+    showMicWarnings();
+    requestAnimationFrame(drawLiveLoop);
+  } catch(err){
+    initBtn.disabled=false; initBtn.textContent='🎤 Включить микрофон';
+    micStatus.style.display='block';
+    micStatus.textContent='Ошибка доступа к микрофону: '+err.message;
+  }
+}
+
+function showMicWarnings(){
+  const s=micSettingsActual; const w=[];
+  w.push('SR: '+actualSampleRate+' Гц');
+  if (s.echoCancellation) w.push('⚠ echoCancellation НЕ отключился');
+  if (s.noiseSuppression) w.push('⚠ noiseSuppression НЕ отключился');
+  if (s.autoGainControl) w.push('⚠ autoGainControl НЕ отключился');
+  micStatus.style.display='block';
+  micStatus.textContent=w.join(' · ');
+}
+
+// ============================================================
+// Per-block processing (called for every 128-sample worklet block)
+// ============================================================
+let analysisAccum=new Float32Array(0); // accumulate for FFT-sized analysis if needed
+function onAudioBlock(samples){
+  // samples: Float32Array (~128)
+  // --- compute block energy (peak + rms) for graph & detector ---
+  let peak=0, sumSq=0;
+  for (let i=0;i<samples.length;i++){
+    const a=Math.abs(samples[i]); if(a>peak)peak=a; sumSq+=samples[i]*samples[i];
+  }
+  const rms=Math.sqrt(sumSq/samples.length);
+  const db = 20*Math.log10((rms||1e-8)); // dBFS (<=0)
+  const tNow = recording ? (rawLength/actualSampleRate) : (performance.now()/1000);
+
+  // live graph ring
+  liveEnergyRing.push(db);
+  if (liveEnergyRing.length>LIVE_GRAPH_POINTS) liveEnergyRing.shift();
+
+  if (recording){
+    rawChunks.push(samples);
+    rawLength += samples.length;
+    const t = rawLength/actualSampleRate;
+    energyPoints.push({t, db, peak});
+    // feed detector (needs spectral centroid -> compute lazily on candidate)
+    detector.feed(t, db, peak, samples, cfg());
+    liveCount.textContent = detector.count;
+  }
+}
+
+// ============================================================
+// Live graph drawing
+// ============================================================
+function drawLiveLoop(){
+  drawEnergyGraph(liveCtx, liveCanvas, liveEnergyRing.map((db,i)=>({t:i,db})),
+                  recording?detector.markers:[], true);
+  requestAnimationFrame(drawLiveLoop);
+}
+
+function dbToY(db, h){ // map -90..0 dBFS to canvas
+  const min=-90, max=0; const c=Math.max(min,Math.min(max,db));
+  return h - ((c-min)/(max-min))*h;
+}
+
+function drawEnergyGraph(ctx, canvas, points, markers, isLive){
+  fitCanvas(canvas);
+  const w=canvas.width, h=canvas.height;
+  ctx.clearRect(0,0,w,h);
+  // grid
+  ctx.strokeStyle='#222732'; ctx.lineWidth=1;
+  for(let db=0;db>=-90;db-=20){ const y=dbToY(db,h);
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
+    ctx.fillStyle='#5a6473';ctx.font='10px sans-serif';ctx.fillText(db+'dB',2,y-2);
+  }
+  if(!points.length)return;
+  // waveform
+  ctx.strokeStyle='#4f8cff';ctx.lineWidth=1.2;ctx.beginPath();
+  const n=points.length;
+  for(let i=0;i<n;i++){
+    const x=(i/(n-1||1))*w; const y=dbToY(points[i].db,h);
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+  }
+  ctx.stroke();
+  // markers (green=shot, red=echo). For live: marker.t is sample-time; map by index proximity.
+  if(markers&&markers.length){
+    for(const m of markers){
+      let x;
+      if(isLive){
+        // live ring holds last LIVE_GRAPH_POINTS blocks; approximate position at right edge window
+        const ageBlocks = (detector.lastT - m.t) * (actualSampleRate/128);
+        const idx = (points.length-1) - ageBlocks;
+        if(idx<0||idx>points.length-1) continue;
+        x=(idx/(points.length-1||1))*w;
+      } else {
+        x=(m.x)*w;
+      }
+      ctx.strokeStyle = m.kind==='shot' ? '#39d353' : '#ff5a5a';
+      ctx.lineWidth=2; ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();
+    }
+  }
+}
+
+function fitCanvas(c){
+  const cssW=c.clientWidth||300;
+  if(c.width!==cssW){ c.width=cssW; }
+}
+
+// ============================================================
+// Shot Detector — 4 layers
+// ============================================================
+function ShotDetector(){
+  this.reset();
+}
+ShotDetector.prototype.reset=function(){
+  this.count=0;
+  this.bg=-70;            // adaptive background dB
+  this.prevDb=-90;
+  this.lastShotT=-999;    // last counted shot time (s)
+  this.lastT=0;
+  this.markers=[];        // {t, kind:'shot'|'echo'}
+  this.pendingEchoes=[];  // predicted echo times from counted shots
+  this.armed=true;
+};
+ShotDetector.prototype.feed=function(t, db, peak, samples, c){
+  this.lastT=t;
+  // --- adaptive background (slow follow on quiet, ignore loud) ---
+  if (db < this.bg+6) this.bg = this.bg*0.995 + db*0.005;
+
+  const blockMs = (samples.length/actualSampleRate)*1000;
+  const slope = (db - this.prevDb)/Math.max(blockMs,0.1); // dB per ms
+  this.prevDb=db;
+
+  // candidate onset: loud enough over background AND in refractory check
+  const overBg = db - this.bg;
+  const sinceShot = (t - this.lastShotT)*1000; // ms
+
+  if (overBg < c.sens) return;          // not loud enough -> not a candidate
+  if (sinceShot < c.refr) return;       // L2 refractory: ignore everything in dead window
+
+  // We have a loud candidate. Decide shot vs echo.
+  // L1: attack slope
+  const sharp = slope >= c.slope;
+
+  // L2/L3: is this candidate inside any predicted echo window?
+  let inEchoWin=false;
+  for(const e of this.pendingEchoes){
+    if (Math.abs((t-e)*1000) <= c.echoW){ inEchoWin=true; break; }
+  }
+
+  // L4: spectral centroid
+  const centroid = this.centroidOf(samples);
+  const bright = centroid >= c.cent;
+
+  let isShot;
+  if (inEchoWin){
+    // In echo window: only a SHARP + BRIGHT transient counts as a real shot over echo (L3)
+    isShot = sharp && bright;
+  } else {
+    // Outside echo window: sharp OR bright enough = shot
+    isShot = sharp || bright;
+  }
+
+  if (isShot){
+    this.count++;
+    this.lastShotT=t;
+    this.markers.push({t, kind:'shot'});
+    // predict its echo (L3)
+    this.pendingEchoes.push(t + c.echo/1000);
+    // keep echo list short
+    this.pendingEchoes = this.pendingEchoes.filter(e => (e - t) > -0.5);
+  } else {
+    this.markers.push({t, kind:'echo'});
+    this.lastShotT=t; // still apply refractory so echo tail doesn't multi-trigger
+  }
+  if(this.markers.length>500) this.markers.shift();
+};
+// spectral centroid via simple DFT magnitude on a short window (cheap, blocks are tiny)
+ShotDetector.prototype.centroidOf=function(samples){
+  const N=Math.min(samples.length, 128);
+  let num=0, den=0;
+  // coarse: use magnitude of a few DFT bins (real DFT, K bins)
+  const K=32;
+  for(let k=1;k<K;k++){
+    let re=0,im=0;
+    const wk=2*Math.PI*k/N;
+    for(let n=0;n<N;n++){ const ang=wk*n; re+=samples[n]*Math.cos(ang); im-=samples[n]*Math.sin(ang); }
+    const mag=Math.sqrt(re*re+im*im);
+    const freq=k*actualSampleRate/N;
+    num+=freq*mag; den+=mag;
+  }
+  return den>0 ? num/den : 0;
+};
+
+// ============================================================
+// Recording control
+// ============================================================
+recBtn.addEventListener('click', ()=>{
+  if(!recording) startRec(); else stopRec();
+});
+function startRec(){
+  rawChunks=[]; rawLength=0; energyPoints=[];
+  detector.reset(); liveCount.textContent='0';
+  recStartTime=performance.now();
+  recording=true;
+  recBtn.textContent='■ Стоп'; recBtn.classList.remove('rec'); recBtn.classList.add('primary');
+}
+async function stopRec(){
+  recording=false;
+  recBtn.textContent='● Запись'; recBtn.classList.add('rec'); recBtn.classList.remove('primary');
+  if(rawLength<actualSampleRate*0.1){ // <0.1s, ignore
+    return;
+  }
+  const raw=flattenRaw();
+  const wavBlob=encodeWAV(raw, actualSampleRate);
+  const spec=computeSpectrogram(raw, actualSampleRate);
+  const rec={
+    timestamp: Date.now(),
+    label: labelSel.value,
+    sampleRate: actualSampleRate,
+    duration: raw.length/actualSampleRate,
+    wavBlob,
+    energyArray: energyPoints,
+    spectrogram: spec,
+    micSettingsActual,
+    detectedShots: detector.markers.filter(m=>m.kind==='shot').length,
+    markers: detector.markers.slice()
+  };
+  await dbAdd(rec);
+  await renderList();
+}
+function flattenRaw(){
+  const out=new Float32Array(rawLength); let o=0;
+  for(const c of rawChunks){ out.set(c,o); o+=c.length; }
+  return out;
+}
+
+// ============================================================
+// WAV PCM16 encoder
+// ============================================================
+function encodeWAV(samples, sr){
+  const n=samples.length;
+  const buf=new ArrayBuffer(44+n*2);
+  const dv=new DataView(buf);
+  const ws=(off,s)=>{for(let i=0;i<s.length;i++)dv.setUint8(off+i,s.charCodeAt(i));};
+  ws(0,'RIFF'); dv.setUint32(4,36+n*2,true); ws(8,'WAVE');
+  ws(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true);
+  dv.setUint16(22,1,true); dv.setUint32(24,sr,true); dv.setUint32(28,sr*2,true);
+  dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+  ws(36,'data'); dv.setUint32(40,n*2,true);
+  let off=44;
+  for(let i=0;i<n;i++){
+    let s=Math.max(-1,Math.min(1,samples[i]));
+    dv.setInt16(off, s<0 ? s*0x8000 : s*0x7FFF, true); off+=2;
+  }
+  return new Blob([buf],{type:'audio/wav'});
+}
+
+// ============================================================
+// Spectrogram (FFT 512, hop 256) — radix-2 iterative FFT
+// returns {bins, frames, hz, data:[frame][bin]=db}
+// ============================================================
+function computeSpectrogram(samples, sr){
+  const N=FFT_SIZE, half=N/2;
+  const win=new Float32Array(N);
+  for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1)); // Hann
+  const frames=[];
+  const re=new Float32Array(N), im=new Float32Array(N);
+  // cap frames to keep storage sane
+  const maxFrames=2000;
+  let step=HOP;
+  const totalFrames=Math.floor((samples.length-N)/HOP);
+  if(totalFrames>maxFrames) step=Math.floor((samples.length-N)/maxFrames);
+  for(let pos=0; pos+N<=samples.length; pos+=step){
+    for(let i=0;i<N;i++){ re[i]=samples[pos+i]*win[i]; im[i]=0; }
+    fft(re,im);
+    const row=new Array(half);
+    for(let k=0;k<half;k++){
+      const mag=Math.sqrt(re[k]*re[k]+im[k]*im[k])/half;
+      row[k]=Math.round(20*Math.log10(mag||1e-8));
+    }
+    frames.push(row);
+  }
+  return {bins:half, frames:frames.length, hz:sr/2, data:frames};
+}
+function fft(re,im){
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){
+    let bit=n>>1;
+    for(;j&bit;bit>>=1)j^=bit;
+    j^=bit;
+    if(i<j){ [re[i],re[j]]=[re[j],re[i]]; [im[i],im[j]]=[im[j],im[i]]; }
+  }
+  for(let len=2;len<=n;len<<=1){
+    const ang=-2*Math.PI/len;
+    const wr=Math.cos(ang), wi=Math.sin(ang);
+    for(let i=0;i<n;i+=len){
+      let cr=1, ci=0;
+      for(let k=0;k<len/2;k++){
+        const a=i+k, b=i+k+len/2;
+        const tr=re[b]*cr-im[b]*ci, ti=re[b]*ci+im[b]*cr;
+        re[b]=re[a]-tr; im[b]=im[a]-ti; re[a]+=tr; im[a]+=ti;
+        const ncr=cr*wr-ci*wi; ci=cr*wi+ci*wr; cr=ncr;
+      }
+    }
+  }
+}
+
+// ============================================================
+// IndexedDB
+// ============================================================
+let _db=null;
+function dbOpen(){
+  return new Promise((res,rej)=>{
+    if(_db)return res(_db);
+    const r=indexedDB.open('shoottimer',1);
+    r.onupgradeneeded=e=>{ e.target.result.createObjectStore('recs',{keyPath:'id',autoIncrement:true}); };
+    r.onsuccess=e=>{ _db=e.target.result; res(_db); };
+    r.onerror=e=>rej(e.target.error);
+  });
+}
+async function dbAdd(rec){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction('recs','readwrite');
+    tx.objectStore('recs').add(rec);
+    tx.oncomplete=res; tx.onerror=e=>rej(e.target.error);
+  });
+}
+async function dbAll(){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const out=[]; const tx=db.transaction('recs','readonly');
+    tx.objectStore('recs').openCursor().onsuccess=e=>{
+      const c=e.target.result; if(c){out.push(c.value);c.continue();} else res(out);
+    };
+    tx.onerror=e=>rej(e.target.error);
+  });
+}
+async function dbGet(id){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction('recs','readonly');
+    tx.objectStore('recs').get(id).onsuccess=e=>res(e.target.result);
+    tx.onerror=e=>rej(e.target.error);
+  });
+}
+async function dbDel(id){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction('recs','readwrite');
+    tx.objectStore('recs').delete(id);
+    tx.oncomplete=res; tx.onerror=e=>rej(e.target.error);
+  });
+}
+async function dbClear(){
+  const db=await dbOpen();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction('recs','readwrite');
+    tx.objectStore('recs').clear();
+    tx.oncomplete=res; tx.onerror=e=>rej(e.target.error);
+  });
+}
+
+// ============================================================
+// Records list + viewer
+// ============================================================
+const recList=$('recList');
+const viewerPanel=$('viewerPanel'), viewerMeta=$('viewerMeta');
+const viewEnergy=$('viewEnergy'), viewEnergyCtx=viewEnergy.getContext('2d');
+const viewSpec=$('viewSpec'), viewSpecCtx=viewSpec.getContext('2d');
+
+async function renderList(){
+  const recs=(await dbAll()).sort((a,b)=>b.timestamp-a.timestamp);
+  if(!recs.length){ recList.innerHTML='<div class="legend">Записей нет.</div>'; return; }
+  recList.innerHTML='';
+  for(const r of recs){
+    const d=new Date(r.timestamp);
+    const div=document.createElement('div'); div.className='rec-item';
+    const lbl={single:'Одиночный',double:'Двойной',series:'Серия'}[r.label]||r.label;
+    div.innerHTML=`
+      <div class="meta">
+        <span class="badge ${r.label}">${lbl}</span>
+        #${r.id} · ${d.toLocaleTimeString()} ·
+        ${r.duration.toFixed(2)}с · детектор: <b>${r.detectedShots}</b> выстр.
+      </div>
+      <div class="actions row">
+        <button data-v="${r.id}">📊 Графики</button>
+        <button data-p="${r.id}">▶ Звук</button>
+        <button data-w="${r.id}">⬇ WAV</button>
+        <button data-j="${r.id}">⬇ JSON</button>
+        <button data-x="${r.id}">🗑</button>
+      </div>`;
+    recList.appendChild(div);
+  }
+  recList.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>viewRecord(+b.dataset.v));
+  recList.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>playRecord(+b.dataset.p));
+  recList.querySelectorAll('[data-w]').forEach(b=>b.onclick=()=>downloadWAV(+b.dataset.w));
+  recList.querySelectorAll('[data-j]').forEach(b=>b.onclick=()=>downloadJSON(+b.dataset.j));
+  recList.querySelectorAll('[data-x]').forEach(b=>b.onclick=async()=>{await dbDel(+b.dataset.x);renderList();});
+}
+
+async function viewRecord(id){
+  const r=await dbGet(id); if(!r)return;
+  viewerPanel.style.display='block';
+  viewerPanel.scrollIntoView({behavior:'smooth'});
+  const dur=r.duration;
+  viewerMeta.innerHTML=`#${r.id} · ${dur.toFixed(2)}с · SR ${r.sampleRate} · детектор: ${r.detectedShots} выстр.`;
+  // energy graph with markers (x normalized 0..1)
+  const pts=r.energyArray.map(p=>({t:p.t, db:p.db}));
+  const markers=(r.markers||[]).map(m=>({x: m.t/dur, kind:m.kind}));
+  drawEnergyGraph(viewEnergyCtx, viewEnergy, pts, markers, false);
+  drawSpectrogram(r.spectrogram);
+}
+function drawSpectrogram(spec){
+  fitCanvas(viewSpec);
+  const w=viewSpec.width, h=viewSpec.height;
+  viewSpecCtx.clearRect(0,0,w,h);
+  if(!spec||!spec.data||!spec.data.length)return;
+  const frames=spec.data.length, bins=spec.bins;
+  const img=viewSpecCtx.createImageData(w,h);
+  for(let x=0;x<w;x++){
+    const f=Math.min(frames-1, Math.floor(x/w*frames));
+    const row=spec.data[f];
+    for(let y=0;y<h;y++){
+      const bin=Math.min(bins-1, Math.floor((1-y/h)*bins)); // low freq bottom
+      const db=row[bin]; // ~ -120..0
+      const v=Math.max(0,Math.min(1,(db+90)/90));
+      const [rr,gg,bb]=heat(v);
+      const idx=(y*w+x)*4;
+      img.data[idx]=rr; img.data[idx+1]=gg; img.data[idx+2]=bb; img.data[idx+3]=255;
+    }
+  }
+  viewSpecCtx.putImageData(img,0,0);
+}
+function heat(v){ // 0..1 -> blue->green->red
+  if(v<0.5){ const t=v/0.5; return [0, Math.round(120+t*135), Math.round(180*(1-t)+60)]; }
+  const t=(v-0.5)/0.5; return [Math.round(255*t), Math.round(255*(1-t*0.6)), 30];
+}
+
+async function playRecord(id){
+  const r=await dbGet(id); if(!r)return;
+  const url=URL.createObjectURL(r.wavBlob);
+  const a=new Audio(url); a.play();
+}
+async function downloadWAV(id){
+  const r=await dbGet(id); if(!r)return;
+  dl(r.wavBlob, `shot_${id}_${r.label}.wav`);
+}
+async function downloadJSON(id){
+  const r=await dbGet(id); if(!r)return;
+  const j={id:r.id,timestamp:r.timestamp,label:r.label,sampleRate:r.sampleRate,
+    duration:r.duration,micSettingsActual:r.micSettingsActual,
+    detectedShots:r.detectedShots,markers:r.markers,
+    energyArray:r.energyArray,spectrogram:r.spectrogram};
+  dl(new Blob([JSON.stringify(j)],{type:'application/json'}), `shot_${id}_${r.label}.json`);
+}
+function dl(blob,name){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
+
+async function exportAll(){
+  const recs=await dbAll();
+  for(const r of recs){
+    await downloadWAV(r.id); await downloadJSON(r.id);
+    await new Promise(res=>setTimeout(res,300)); // let Safari queue downloads
+  }
+}
+
+// ---------- buttons ----------
+initBtn.addEventListener('click', initMic);
+$('refreshBtn').addEventListener('click', renderList);
+$('exportAllBtn').addEventListener('click', exportAll);
+$('clearBtn').addEventListener('click', async()=>{
+  if(confirm('Удалить ВСЕ записи?')){ await dbClear(); renderList(); }
+});
+$('closeViewer').addEventListener('click', ()=>viewerPanel.style.display='none');
+
+// init list on load
+renderList();
+</script>
+</body>
+</html>
